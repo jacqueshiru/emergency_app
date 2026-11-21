@@ -71,11 +71,9 @@ export function hasRealSmsProvider(): boolean {
  */
 export function devOtpAllowed(): boolean {
   if (hasRealSmsProvider()) return false;
+  if (config.env === 'production') return false;
   if (config.env === 'test') return true;
-  // In local development, make the OTP usable even if a shell or editor
-  // overrides/fails to load the optional ALLOW_DEV_OTP=.env entry.
-  // It remains forbidden in production.
-  return config.env === 'development';
+  return process.env.ALLOW_DEV_OTP === 'true';
 }
 
 /** Allowed browser origins. `true` (reflect) only outside production with CORS_ORIGIN unset or "*". */

@@ -99,8 +99,9 @@ export class AuthController {
       return res.status(200).json({
         success: true,
         message: 'Verification code sent',
-        // Test automation receives the code; browser/development clients never receive it.
-        ...(config.env === 'test' ? { devCode: plainOtp } : {}),
+        // Test and explicitly enabled development/mock clients receive the code.
+        // Real SMS providers and production never return it.
+        ...(devOtpAllowed() ? { devCode: plainOtp } : {}),
       });
     } catch (error: any) {
       logger.error('Error in requestOtp', { error: error.message });
