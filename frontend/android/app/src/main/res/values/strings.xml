@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">SEAS Emergency Alert</string>
+    <string name="title_activity_main">SEAS Emergency Alert</string>
+    <string name="package_name">ke.ac.zetech.seas</string>
+    <string name="custom_url_scheme">ke.ac.zetech.seas</string>
+</resources>

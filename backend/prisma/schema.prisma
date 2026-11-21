@@ -1,0 +1,113 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id              String            @id @default(uuid())
+  phoneNumber     String            @unique // E.164 normalized
+  name            String
+  role            String            @default("USER")
+  adminMfaSecret  String?
+  adminMfaEnabled Boolean           @default(false)
+  passwordResetRequired Boolean           @default(false)
+  totpSecret            String?
+  totpEnabled           Boolean           @default(false)
+  adminMfaVerifiedAt    DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  contacts        EmergencyContact[]
+  alerts          Alert[]
+  refreshSessions RefreshSession[]
+}
+
+model EmergencyContact {
+  id           String           @id @default(uuid())
+  userId       String
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name         String
+  phoneNumber  String           // E.164 normalized
+  relationship String?
+  tier         String           @default("EVERYDAY")
+  consentStatus String           @default("PENDING")
+  consentAt     DateTime?
+  optOutAt      DateTime?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+  deliveries    AlertDelivery[]
+
+  @@unique([userId, phoneNumber]) // no duplicate active contacts per user
+}
+
+model Alert {
+  id                String          @id @default(uuid())
+  userId            String
+  user              User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  idempotencyKey    String          @unique
+  latitude          Float?
+  longitude         Float?
+  accuracy          Float?          // metres, from Geolocation API
+  locationAvailable Boolean
+  triggeredAt       DateTime        @default(now())
+  delayed           Boolean         @default(false)
+  status            String          @default("CREATED")
+  resolutionStatus  String          @default("OPEN")
+  resolvedAt        DateTime?
+  deviceProofNonce  String?
+  deliveries        AlertDelivery[]
+}
+
+model AlertDelivery {
+  id                   String            @id @default(uuid())
+  alertId              String
+  alert                Alert             @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  contactId            String?           // nullable: delivery history survives contact deletion
+  contact              EmergencyContact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  contactNameSnapshot  String
+  contactPhoneSnapshot String
+  relationshipSnapshot String?
+  channel              String            @default("sms")
+  status               String            @default("PENDING")
+  deviceVerified       Boolean           @default(false)
+  providerMessageId    String?
+  lastErrorCode        String?           // sanitized, safe to display
+  attempts             Int               @default(0)
+  lastAttemptAt        DateTime?
+  nextRetryAt          DateTime?
+  claimedAt            DateTime?         // short-lived worker claim; stale claims are re-claimable
+  @@index([status, nextRetryAt])
+  updatedAt            DateTime          @updatedAt
+}
+
+model OtpRequest {
+  id          String    @id @default(uuid())
+  phoneNumber String    // E.164
+  codeHash    String    // hashed, never plaintext
+  expiresAt   DateTime
+  attempts    Int       @default(0)
+  consumedAt  DateTime? // set on successful verify; prevents reuse
+  createdAt   DateTime  @default(now())
+}
+
+model RefreshSession {
+  id                    String    @id @default(uuid())
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash             String    @unique // hashed, never plaintext
+  createdAt             DateTime  @default(now())
+  expiresAt             DateTime
+  revokedAt             DateTime?
+  adminMfaVerifiedAt    DateTime?
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  actorId   String?  // admin/user performing the action; null for system
+  action    String   // e.g. "ADMIN_ROLE_GRANTED", "DASHBOARD_ALERT_VIEWED"
+  targetId  String?
+  createdAt DateTime @default(now())
+}

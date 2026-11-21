@@ -1,0 +1,17 @@
+{
+  "appId": "ke.ac.zetech.seas",
+  "appName": "SEAS Emergency Alert",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 1500,
+      "backgroundColor": "#09090b"
+    }
+  },
+  "android": {
+    "allowMixedContent": false
+  }
+}

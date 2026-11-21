@@ -1,0 +1,26 @@
+{
+  "name": "seas-root",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "shared",
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev:backend": "npm --workspace=backend run dev",
+    "dev:frontend": "npm --workspace=frontend run dev",
+    "build:shared": "npm --workspace=shared run build",
+    "build:backend": "npm --workspace=backend run build",
+    "build:frontend": "npm --workspace=frontend run build",
+    "build": "npm run build:shared && npm run build:backend && npm run build:frontend",
+    "test": "npm --workspace=backend run test",
+    "postinstall": "npm run build:shared && npm --workspace=backend run prisma:generate",
+    "android:sync": "npm --workspace=frontend run cap:sync",
+    "android:open": "npm --workspace=frontend run cap:open"
+  },
+  "engines": {
+    "node": ">=22",
+    "npm": ">=10"
+  }
+}
