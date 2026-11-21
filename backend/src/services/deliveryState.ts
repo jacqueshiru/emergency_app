@@ -3,7 +3,7 @@ import { DeliveryStatus, AlertProcessingStatus } from '@seas/shared';
 import { emitDeliveryUpdated, emitResolutionUpdated } from './socket';
 import { logger } from '../utils/logger';
 
-const TERMINAL = [DeliveryStatus.DELIVERED, DeliveryStatus.FAILED] as string[];
+const TERMINAL = [DeliveryStatus.DELIVERED, DeliveryStatus.FAILED];
 
 export interface TransitionExtra {
   providerMessageId?: string | null;
