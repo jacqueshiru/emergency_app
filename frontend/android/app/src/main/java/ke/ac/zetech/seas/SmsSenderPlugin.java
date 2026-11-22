@@ -240,20 +240,6 @@ public class SmsSenderPlugin extends Plugin {
         }
     }
 
-    /** One PendingIntent per message part; unique request code, explicit package, immutable. */
-    private PendingIntent resultIntent(String action, String id, int part) {
-        Intent intent = new Intent(action);
-        intent.setPackage(getContext().getPackageName());
-        intent.putExtra("id", id);
-        intent.putExtra("part", part);
-        return PendingIntent.getBroadcast(
-            getContext(),
-            requestCodes.getAndIncrement(),
-            intent,
-            PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
-        );
-    }
-
     /** TP-Status of a delivery report, or -1 when the report carries no readable PDU. */
     @SuppressWarnings("deprecation")
     private static int deliveryStatus(Intent intent) {
