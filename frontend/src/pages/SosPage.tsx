@@ -624,25 +624,61 @@ export const SosPage: React.FC = () => {
   };
 
   const isLocalAlert = Boolean(activeAlert?.id.startsWith('local:'));
+  const isOpenAlert = activeAlert?.resolutionStatus === AlertResolutionStatus.OPEN;
 
   const handleResolveAlert = async () => {
-    if (!activeAlert || isLocalAlert) return;
+    if (!activeAlert || !isOpenAlert) return;
+    // Local (not yet on server): clear on-phone state / queue entry.
+    if (isLocalAlert) {
+      try {
+        await offlineQueue.remove(activeAlert.idempotencyKey);
+      } catch {
+        // ignore
+      }
+      setActiveAlert(null);
+      setErrorMessage(null);
+      setInfoMessage('Alert closed on this device. It was not yet recorded on the server.');
+      await checkOfflineQueue();
+      return;
+    }
     try {
-      const updated = await api.resolveAlert(activeAlert.id);
-      setActiveAlert(updated);
+      setLoading(true);
+      setErrorMessage(null);
+      await api.resolveAlert(activeAlert.id);
+      setActiveAlert(null);
+      setInfoMessage('Alert marked as resolved. You are safe.');
     } catch (err: any) {
       setErrorMessage(err.message || 'Failed to resolve alert');
+    } finally {
+      setLoading(false);
     }
   };
 
   const handleCancelAlert = async () => {
-    if (!activeAlert || isLocalAlert) return;
+    if (!activeAlert || !isOpenAlert) return;
     if (!window.confirm('Cancel emergency alert? Only use this if triggered by mistake.')) return;
+    if (isLocalAlert) {
+      try {
+        await offlineQueue.remove(activeAlert.idempotencyKey);
+      } catch {
+        // ignore
+      }
+      setActiveAlert(null);
+      setErrorMessage(null);
+      setInfoMessage('Alert cancelled on this device. It was not yet recorded on the server.');
+      await checkOfflineQueue();
+      return;
+    }
     try {
-      const updated = await api.cancelAlert(activeAlert.id);
-      setActiveAlert(updated);
+      setLoading(true);
+      setErrorMessage(null);
+      await api.cancelAlert(activeAlert.id);
+      setActiveAlert(null);
+      setInfoMessage('Alert cancelled.');
     } catch (err: any) {
       setErrorMessage(err.message || 'Failed to cancel alert');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -761,7 +797,7 @@ export const SosPage: React.FC = () => {
         </div>
       )}
 
-      {activeAlert ? (
+      {isOpenAlert && activeAlert ? (
         <div className="bg-zinc-900 border border-red-900/60 rounded-3xl p-6 sm:p-8 shadow-2xl relative overflow-hidden">
           <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-red-600 via-red-500 to-red-600 animate-pulse"></div>
 
@@ -894,28 +930,30 @@ export const SosPage: React.FC = () => {
           </div>
 
           {/* Incident Resolution Actions */}
-          <div className="pt-4 border-t border-zinc-800 flex flex-col sm:flex-row gap-3">
-            <button
-              onClick={handleResolveAlert}
-              disabled={isLocalAlert}
-              className="flex-1 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold py-3 px-4 rounded-xl flex items-center justify-center space-x-2 transition shadow-lg shadow-emerald-950/50"
-            >
-              <Check className="w-4 h-4" />
-              <span>I Am Safe (Mark Resolved)</span>
-            </button>
+          {isOpenAlert && activeAlert ? (
+            <div className="pt-4 border-t border-zinc-800 flex flex-col sm:flex-row gap-3">
+              <button
+                onClick={handleResolveAlert}
+                disabled={loading}
+                className="flex-1 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold py-3 px-4 rounded-xl flex items-center justify-center space-x-2 transition shadow-lg shadow-emerald-950/50"
+              >
+                <Check className="w-4 h-4" />
+                <span>I Am Safe (Mark Resolved)</span>
+              </button>
 
-            <button
-              onClick={handleCancelAlert}
-              disabled={isLocalAlert}
-              className="bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed text-zinc-300 py-3 px-4 rounded-xl text-sm font-medium transition"
-            >
-              Cancel Alert
-            </button>
-          </div>
+              <button
+                onClick={handleCancelAlert}
+                disabled={loading}
+                className="bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed text-zinc-300 py-3 px-4 rounded-xl text-sm font-medium transition"
+              >
+                Cancel Alert
+              </button>
+            </div>
+          ) : null}
           {isLocalAlert && (
             <p className="mt-3 text-xs text-zinc-500">
-              This alert is saved on your phone and will be recorded online when you reconnect. You can mark it resolved
-              once it has synced.
+              This alert is saved on your phone and will be recorded online when you reconnect. You can still
+              resolve or cancel it here — that closes it on this device immediately.
             </p>
           )}
         </div>
