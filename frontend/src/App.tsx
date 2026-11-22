@@ -1,5 +1,5 @@
-import React from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import React, { useEffect } from 'react';
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { Navbar } from './components/Navbar';
 import { SystemLimitsBanner } from './components/SystemLimitsBanner';
@@ -8,6 +8,32 @@ import { ContactsPage } from './pages/ContactsPage';
 import { AdminDashboardPage } from './pages/AdminDashboardPage';
 import { LoginPage } from './pages/LoginPage';
 import { PrivacyPage } from './pages/PrivacyPage';
+import { onVolumeSos } from './services/smsSender';
+import { requestVolumeSos } from './services/volumeSosBridge';
+
+/**
+ * Always-mounted (inside the router + auth) listener for the native triple-volume
+ * SOS. Ensures the event is handled even when the user is on Contacts/Admin/etc.
+ * Navigates to the SOS screen so the user sees progress and the emergency-services prompt.
+ */
+const VolumeSosListener: React.FC = () => {
+  const { isAuthenticated, loading } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  useEffect(() => {
+    if (loading || !isAuthenticated) return;
+
+    return onVolumeSos(() => {
+      requestVolumeSos();
+      if (location.pathname !== '/') {
+        navigate('/', { replace: false });
+      }
+    });
+  }, [isAuthenticated, loading, navigate, location.pathname]);
+
+  return null;
+};
 
 const ProtectedRoute: React.FC<{ children: React.ReactNode; adminOnly?: boolean }> = ({
   children,
@@ -44,6 +70,7 @@ export const App: React.FC = () => {
   return (
     <AuthProvider>
       <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+        <VolumeSosListener />
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route

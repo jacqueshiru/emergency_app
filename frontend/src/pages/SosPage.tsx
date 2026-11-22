@@ -16,7 +16,15 @@ import { getPosition, confirmHaptic, onReconnect, onResume } from '../services/p
 import * as tokenStore from '../services/tokenStore';
 import { useAuth } from '../context/AuthContext';
 import { loadContacts, saveContacts, type CachedContact } from '../services/contactsCache';
-import { onSmsDelivery, onVolumeSos, openVolumeSosAccessibilitySettings, smsSender, smsSenderSupported, volumeSosAccessibilityEnabled, type SmsDeliveryEvent } from '../services/smsSender';
+import {
+  onSmsDelivery,
+  openVolumeSosAccessibilitySettings,
+  smsSender,
+  smsSenderSupported,
+  volumeSosAccessibilityEnabled,
+  type SmsDeliveryEvent,
+} from '../services/smsSender';
+import { setVolumeSosHandler } from '../services/volumeSosBridge';
 import {
   initDeviceSms,
   sendSosFromDevice,
@@ -214,7 +222,9 @@ export const SosPage: React.FC = () => {
   // Retry the queue on mount (a restart while already online must not strand entries), when the
   // network comes back, and when the app returns to the foreground.
   useEffect(() => {
-    const run = () => { if (navigator.onLine) void processOfflineQueue(); };
+    const run = () => {
+      if (navigator.onLine) void processOfflineQueue();
+    };
     run();
     const offReconnect = onReconnect(run);
     const offResume = onResume(run);
@@ -337,7 +347,13 @@ export const SosPage: React.FC = () => {
             // An alert is already active server-side; this queued duplicate must not retry forever.
             await offlineQueue.remove(record.idempotencyKey);
             if (err.body?.alert) setActiveAlert(err.body.alert);
-          } else if (err instanceof ApiError && err.status >= 400 && err.status < 500 && err.status !== 401 && err.status !== 429) {
+          } else if (
+            err instanceof ApiError &&
+            err.status >= 400 &&
+            err.status < 500 &&
+            err.status !== 401 &&
+            err.status !== 429
+          ) {
             // Permanent rejection (e.g. NO_CONTACTS): surface it rather than silently retrying.
             setErrorMessage(`A queued alert was rejected by the server: ${err.message}`);
             await offlineQueue.remove(record.idempotencyKey);
@@ -418,7 +434,27 @@ export const SosPage: React.FC = () => {
       return true; // nothing else can be tried
     }
 
+    const allContacts = contacts;
     contacts = contacts.filter((c) => (c.tier ?? 'EVERYDAY') === tier);
+
+    // Volume (CRITICAL) SOS must still reach someone. If the user has not marked any
+    // contact as Critical, fall back to every saved contact rather than silently failing.
+    // Track this so the server record is not filtered to an empty CRITICAL set.
+    let effectiveTier: 'CRITICAL' | 'EVERYDAY' | undefined = tier;
+    if (contacts.length === 0 && tier === 'CRITICAL') {
+      contacts = allContacts;
+      effectiveTier = undefined; // server: all opted-in contacts
+      setInfoMessage(
+        'No Critical contacts configured — notifying all emergency contacts. Mark contacts as Critical under Contacts for the volume shortcut.'
+      );
+    } else if (contacts.length === 0) {
+      setErrorMessage(
+        tier === 'CRITICAL'
+          ? 'Add at least one Critical emergency contact for the volume SOS shortcut.'
+          : 'Add at least one emergency contact before using SOS.'
+      );
+      return true;
+    }
 
     const key = payload.idempotencyKey;
     const userId = user?.id ?? '';
@@ -448,11 +484,18 @@ export const SosPage: React.FC = () => {
     if (results.every((r) => r.status === 'FAILED')) {
       // Nothing left the phone (no signal, airplane mode...): let the server try instead.
       setActiveAlert(null);
-      setErrorMessage(`Could not send SMS from this phone (${results[0]?.error || 'unknown error'}). Trying the server...`);
+      setErrorMessage(
+        `Could not send SMS from this phone (${results[0]?.error || 'unknown error'}). Trying the server...`
+      );
       return false;
     }
 
-    const full: CreateAlertDTO = { ...payload, sentByDevice: true, deviceDeliveries: results, recipientTier: tier };
+    const full: CreateAlertDTO = {
+      ...payload,
+      sentByDevice: true,
+      deviceDeliveries: results,
+      recipientTier: effectiveTier,
+    };
     setActiveAlert(buildLocalAlert(full, contacts, userId));
 
     // Record it on the server: online now, otherwise queued (the texts are already out).
@@ -476,7 +519,9 @@ export const SosPage: React.FC = () => {
       await flushLateReports(key, alert.id);
     } catch (err: any) {
       if (err instanceof ApiError && err.status >= 400 && err.status < 500 && err.status !== 401 && err.status !== 429) {
-        setInfoMessage(`SOS texts were sent from this phone, but the server did not record the alert: ${err.message}`);
+        setInfoMessage(
+          `SOS texts were sent from this phone, but the server did not record the alert: ${err.message}`
+        );
       } else {
         await keepForLater();
       }
@@ -521,10 +566,14 @@ export const SosPage: React.FC = () => {
         await offlineQueue.enqueue(payload);
         await checkOfflineQueue();
         // State 2: queued, not yet sent.
-        setErrorMessage(`${reason} Your alert is saved on this device and will send automatically when you reconnect.`);
+        setErrorMessage(
+          `${reason} Your alert is saved on this device and will send automatically when you reconnect.`
+        );
       } catch (e: any) {
         // State 1: could not even queue it — the user must act (call emergency services directly).
-        setErrorMessage(`Your alert could NOT be saved or sent (${e?.message || 'storage error'}). Call emergency services directly.`);
+        setErrorMessage(
+          `Your alert could NOT be saved or sent (${e?.message || 'storage error'}). Call emergency services directly.`
+        );
       }
     };
 
@@ -537,7 +586,21 @@ export const SosPage: React.FC = () => {
         await queueIt('You are offline.');
         return;
       }
-      const alert = await api.createAlert(payload);
+      let alert;
+      try {
+        alert = await api.createAlert(payload);
+      } catch (firstErr: any) {
+        // Volume SOS with no Critical contacts: retry without tier so all contacts are notified.
+        if (tier === 'CRITICAL' && firstErr instanceof ApiError && firstErr.code === 'NO_CONTACTS') {
+          const { recipientTier: _drop, ...withoutTier } = payload;
+          alert = await api.createAlert(withoutTier);
+          setInfoMessage(
+            'No Critical contacts configured — notified all emergency contacts. Mark contacts as Critical under Contacts for the volume shortcut.'
+          );
+        } else {
+          throw firstErr;
+        }
+      }
       setActiveAlert(alert);
       setErrorMessage(null);
     } catch (err: any) {
@@ -593,12 +656,21 @@ export const SosPage: React.FC = () => {
     checkOfflineQueue();
   };
 
-  useEffect(() => onVolumeSos(() => {
-      if (!triggerInFlight.current) void triggerSos('CRITICAL');
-    }), []);
+  // Keep a stable ref so the always-on volume bridge can call the latest triggerSos
+  // without re-subscribing every render (triggerSos closes over location/contacts state).
+  const triggerSosRef = useRef(triggerSos);
+  triggerSosRef.current = triggerSos;
 
   useEffect(() => {
-    const refresh = () => { void volumeSosAccessibilityEnabled().then(setVolumeSosEnabled); };
+    return setVolumeSosHandler(() => {
+      if (!triggerInFlight.current) void triggerSosRef.current('CRITICAL');
+    });
+  }, []);
+
+  useEffect(() => {
+    const refresh = () => {
+      void volumeSosAccessibilityEnabled().then(setVolumeSosEnabled);
+    };
     refresh();
     return onResume(refresh);
   }, []);
@@ -608,54 +680,56 @@ export const SosPage: React.FC = () => {
       {/* Offline Queued Alerts Notification */}
       {queuedAlerts.some((q) => !q.sentByDevice) && (
         <div className="mb-6 space-y-3">
-          {queuedAlerts.filter((q) => !q.sentByDevice).map((q) => {
-            const stale = offlineQueue.isStale(q);
-            return (
-              <div
-                key={q.idempotencyKey}
-                className="p-4 rounded-2xl bg-amber-950/40 border border-amber-800 text-amber-200"
-              >
-                <div className="flex items-start justify-between">
-                  <div className="flex items-center space-x-2">
-                    <WifiOff className="w-5 h-5 text-amber-400 shrink-0" />
-                    <div>
-                      <h3 className="text-sm font-semibold">
-                        {stale ? 'Stale Offline Alert Held (>10 mins)' : 'Queued Alert — Waiting for network'}
-                      </h3>
-                      <p className="text-xs text-amber-300/80 mt-0.5">
-                        Triggered at {new Date(q.triggeredAt).toLocaleTimeString()}. Attempts: {q.attempts}.
-                      </p>
+          {queuedAlerts
+            .filter((q) => !q.sentByDevice)
+            .map((q) => {
+              const stale = offlineQueue.isStale(q);
+              return (
+                <div
+                  key={q.idempotencyKey}
+                  className="p-4 rounded-2xl bg-amber-950/40 border border-amber-800 text-amber-200"
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-center space-x-2">
+                      <WifiOff className="w-5 h-5 text-amber-400 shrink-0" />
+                      <div>
+                        <h3 className="text-sm font-semibold">
+                          {stale ? 'Stale Offline Alert Held (>10 mins)' : 'Queued Alert — Waiting for network'}
+                        </h3>
+                        <p className="text-xs text-amber-300/80 mt-0.5">
+                          Triggered at {new Date(q.triggeredAt).toLocaleTimeString()}. Attempts: {q.attempts}.
+                        </p>
+                      </div>
                     </div>
                   </div>
-                </div>
 
-                {stale ? (
-                  <div className="mt-3 pt-3 border-t border-amber-800/40 flex items-center justify-between">
-                    <span className="text-xs text-amber-300">Emergency may have passed. Still need help?</span>
-                    <div className="flex space-x-2">
-                      <button
-                        onClick={() => handleDiscardQueued(q.idempotencyKey)}
-                        className="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs rounded-lg"
-                      >
-                        Discard
-                      </button>
-                      <button
-                        onClick={() => handleConfirmStaleQueued(q.idempotencyKey)}
-                        className="px-3 py-1 bg-amber-600 hover:bg-amber-500 text-black font-semibold text-xs rounded-lg"
-                      >
-                        Yes, Send Now
-                      </button>
+                  {stale ? (
+                    <div className="mt-3 pt-3 border-t border-amber-800/40 flex items-center justify-between">
+                      <span className="text-xs text-amber-300">Emergency may have passed. Still need help?</span>
+                      <div className="flex space-x-2">
+                        <button
+                          onClick={() => handleDiscardQueued(q.idempotencyKey)}
+                          className="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs rounded-lg"
+                        >
+                          Discard
+                        </button>
+                        <button
+                          onClick={() => handleConfirmStaleQueued(q.idempotencyKey)}
+                          className="px-3 py-1 bg-amber-600 hover:bg-amber-500 text-black font-semibold text-xs rounded-lg"
+                        >
+                          Yes, Send Now
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ) : (
-                  <div className="mt-2 text-[11px] text-amber-400/80 flex items-center space-x-1.5">
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                    <span>Retrying automatically when network is available...</span>
-                  </div>
-                )}
-              </div>
-            );
-          })}
+                  ) : (
+                    <div className="mt-2 text-[11px] text-amber-400/80 flex items-center space-x-1.5">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      <span>Retrying automatically when network is available...</span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
         </div>
       )}
 
@@ -730,8 +804,13 @@ export const SosPage: React.FC = () => {
                     : 'Location Unavailable (Proceeded safely)'}
                 </span>
                 {activeAlert.locationAvailable && activeAlert.accuracy != null && (
-                  <span className={`block text-[11px] ${activeAlert.accuracy > GPS_POOR_ACCURACY_M ? 'text-amber-400' : 'text-zinc-500'}`}>
-                    {activeAlert.accuracy > GPS_POOR_ACCURACY_M ? 'Approximate location' : 'Precise location'} (±{Math.round(activeAlert.accuracy)} m)
+                  <span
+                    className={`block text-[11px] ${
+                      activeAlert.accuracy > GPS_POOR_ACCURACY_M ? 'text-amber-400' : 'text-zinc-500'
+                    }`}
+                  >
+                    {activeAlert.accuracy > GPS_POOR_ACCURACY_M ? 'Approximate location' : 'Precise location'} (±
+                    {Math.round(activeAlert.accuracy)} m)
                   </span>
                 )}
               </div>
@@ -752,9 +831,7 @@ export const SosPage: React.FC = () => {
           {/* Delivery Status Per Contact */}
           <div className="space-y-3 mb-8">
             <div className="flex items-center justify-between">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
-                Verified Recipient Status
-              </h3>
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">Verified Recipient Status</h3>
               <span className="text-xs text-zinc-500 font-mono">
                 {activeAlert.deliveries.filter((d) => d.status === DeliveryStatus.DELIVERED).length} /{' '}
                 {activeAlert.deliveries.length} Delivered
@@ -837,8 +914,8 @@ export const SosPage: React.FC = () => {
           </div>
           {isLocalAlert && (
             <p className="mt-3 text-xs text-zinc-500">
-              This alert is saved on your phone and will be recorded online when you reconnect. You can mark it
-              resolved once it has synced.
+              This alert is saved on your phone and will be recorded online when you reconnect. You can mark it resolved
+              once it has synced.
             </p>
           )}
         </div>
@@ -847,7 +924,7 @@ export const SosPage: React.FC = () => {
         <div className="flex flex-col items-center justify-center py-6">
           {TEST_MODE && (
             <div className="mb-3 text-xs font-bold text-amber-300 bg-amber-950/50 border border-amber-700 px-3 py-1.5 rounded-full">
-              TEST MODE: texts are marked "NOT A REAL EMERGENCY"
+              TEST MODE: texts are marked &quot;NOT A REAL EMERGENCY&quot;
             </div>
           )}
           {deviceSmsState === 'ready' && (
@@ -965,8 +1042,8 @@ export const SosPage: React.FC = () => {
             Press and hold the button for 1.5 seconds. Releasing before the ring fills cancels activation.
           </p>
 
-          {smsSenderSupported && (
-            volumeSosEnabled ? (
+          {smsSenderSupported &&
+            (volumeSosEnabled ? (
               <div className="mb-4 text-xs text-emerald-300 bg-emerald-950/40 border border-emerald-900 px-3 py-1.5 rounded-full">
                 Triple-volume SOS: ON
               </div>
@@ -978,8 +1055,7 @@ export const SosPage: React.FC = () => {
               >
                 Enable triple-volume SOS in Accessibility settings
               </button>
-            )
-          )}
+            ))}
         </div>
       )}
     </div>
