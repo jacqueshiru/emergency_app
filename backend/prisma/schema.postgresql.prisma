@@ -7,35 +7,11 @@ generator client {
   provider = "prisma-client-js"
 }
 
-enum Role {
-  USER
-  ADMIN
-}
-
-enum AlertProcessingStatus {
-  CREATED
-  PROCESSING
-  COMPLETED
-}
-
-enum AlertResolutionStatus {
-  OPEN
-  RESOLVED
-  CANCELLED
-}
-
-enum DeliveryStatus {
-  PENDING
-  SENT
-  DELIVERED
-  FAILED
-}
-
 model User {
   id              String            @id @default(uuid())
   phoneNumber     String            @unique // E.164 normalized
   name            String
-  role            Role              @default(USER)
+  role            String            @default("USER")
   adminMfaSecret  String?
   adminMfaEnabled Boolean           @default(false)
   passwordResetRequired Boolean           @default(false)
@@ -78,8 +54,8 @@ model Alert {
   locationAvailable Boolean
   triggeredAt       DateTime              @default(now())
   delayed           Boolean               @default(false)
-  status            AlertProcessingStatus @default(CREATED)
-  resolutionStatus  AlertResolutionStatus @default(OPEN)
+  status            String                @default("CREATED")
+  resolutionStatus  String                @default("OPEN")
   resolvedAt        DateTime?
   deviceProofNonce  String?
   deliveries        AlertDelivery[]
@@ -95,7 +71,7 @@ model AlertDelivery {
   contactPhoneSnapshot String
   relationshipSnapshot String?
   channel              String            @default("sms")
-  status               DeliveryStatus    @default(PENDING)
+  status               String            @default("PENDING")
   deviceVerified       Boolean           @default(false)
   providerMessageId    String?
   lastErrorCode        String?           // sanitized, safe to display
