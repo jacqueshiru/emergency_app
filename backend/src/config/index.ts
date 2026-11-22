@@ -73,7 +73,7 @@ export function devOtpAllowed(): boolean {
   if (hasRealSmsProvider()) return false;
   if (config.env === 'production') return false;
   if (config.env === 'test') return true;
-  return process.env.ALLOW_DEV_OTP === 'true';
+  return smsConfig.provider === 'mock' || process.env.ALLOW_DEV_OTP === 'true';
 }
 
 /** Allowed browser origins. `true` (reflect) only outside production with CORS_ORIGIN unset or "*". */
