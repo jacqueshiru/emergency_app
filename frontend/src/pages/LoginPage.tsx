@@ -14,6 +14,7 @@ export const LoginPage: React.FC = () => {
   const [phoneNumber, setPhoneNumber] = useState('');
   const [name, setName] = useState('');
   const [otpCode, setOtpCode] = useState('');
+  const [devOtpCode, setDevOtpCode] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cooldown, setCooldown] = useState(0);
@@ -58,7 +59,9 @@ export const LoginPage: React.FC = () => {
     setError(null);
 
     try {
-      await api.requestOtp(phoneNumber.trim(), name.trim() || undefined);
+      const result = await api.requestOtp(phoneNumber.trim(), name.trim() || undefined);
+      setDevOtpCode(result.devCode ?? null);
+      if (result.devCode) setOtpCode(result.devCode);
       setStep('otp');
       setCooldown(60);
     } catch (err: any) {
@@ -152,6 +155,12 @@ export const LoginPage: React.FC = () => {
           </form>
         ) : (
           <form onSubmit={handleVerifyOtp} className="space-y-4">
+            {devOtpCode && (
+              <div role="status" className="p-3 rounded-xl border border-amber-700 bg-amber-950/40 text-amber-200 text-sm text-center">
+                Staging OTP: <span className="font-mono font-bold tracking-widest text-base">{devOtpCode}</span>
+              </div>
+            )}
+
             <div>
               <div className="flex justify-between items-center mb-1.5">
                 <label className="block text-xs font-medium text-zinc-300">
