@@ -16,7 +16,7 @@ import { getPosition, confirmHaptic, onReconnect, onResume } from '../services/p
 import * as tokenStore from '../services/tokenStore';
 import { useAuth } from '../context/AuthContext';
 import { loadContacts, saveContacts, type CachedContact } from '../services/contactsCache';
-import { onSmsDelivery, onVolumeSos, smsSender, smsSenderSupported, type SmsDeliveryEvent } from '../services/smsSender';
+import { onSmsDelivery, onVolumeSos, openVolumeSosAccessibilitySettings, smsSender, smsSenderSupported, volumeSosAccessibilityEnabled, type SmsDeliveryEvent } from '../services/smsSender';
 import {
   initDeviceSms,
   sendSosFromDevice,
@@ -129,6 +129,7 @@ export const SosPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const socketRef = useRef<Socket | null>(null);
+  const [volumeSosEnabled, setVolumeSosEnabled] = useState(false);
 
   useEffect(() => {
     activeAlertRef.current = activeAlert;
@@ -596,6 +597,12 @@ export const SosPage: React.FC = () => {
       if (!triggerInFlight.current) void triggerSos('CRITICAL');
     }), []);
 
+  useEffect(() => {
+    const refresh = () => { void volumeSosAccessibilityEnabled().then(setVolumeSosEnabled); };
+    refresh();
+    return onResume(refresh);
+  }, []);
+
   return (
     <div className="max-w-2xl mx-auto px-4 py-8">
       {/* Offline Queued Alerts Notification */}
@@ -957,6 +964,22 @@ export const SosPage: React.FC = () => {
           <p className="text-xs text-zinc-400 mt-8 text-center max-w-sm">
             Press and hold the button for 1.5 seconds. Releasing before the ring fills cancels activation.
           </p>
+
+          {smsSenderSupported && (
+            volumeSosEnabled ? (
+              <div className="mb-4 text-xs text-emerald-300 bg-emerald-950/40 border border-emerald-900 px-3 py-1.5 rounded-full">
+                Triple-volume SOS: ON
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void openVolumeSosAccessibilitySettings()}
+                className="mb-4 max-w-sm text-center text-xs text-amber-200 bg-amber-950/40 border border-amber-800 px-3 py-2 rounded-2xl"
+              >
+                Enable triple-volume SOS in Accessibility settings
+              </button>
+            )
+          )}
         </div>
       )}
     </div>

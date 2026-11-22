@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -298,22 +299,62 @@ public class SmsSenderPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void isAccessibilityEnabled(PluginCall call) {
+        android.text.TextUtils.SimpleStringSplitter splitter = new android.text.TextUtils.SimpleStringSplitter(':');
+        String enabledServices = android.provider.Settings.Secure.getString(
+            getContext().getContentResolver(),
+            android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        );
+        boolean enabled = false;
+        if (enabledServices != null) {
+            splitter.setString(enabledServices);
+            while (splitter.hasNext()) {
+                android.content.ComponentName component = android.content.ComponentName.unflattenFromString(splitter.next());
+                if (component != null && component.getPackageName().equals(getContext().getPackageName())
+                        && component.getClassName().equals(SosVolumeAccessibilityService.class.getName())) {
+                    enabled = true;
+                    break;
+                }
+            }
+        }
+        JSObject result = new JSObject();
+        result.put("enabled", enabled);
+        call.resolve(result);
+    }
+
+    @PluginMethod
+    public void openAccessibilitySettings(PluginCall call) {
+        Intent intent = new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        getContext().startActivity(intent);
+        call.resolve(new JSObject());
+    }
+
+    @PluginMethod
     public void pickContact(PluginCall call) {
+        getBridge().saveCall(call);
         Intent intent = new Intent(Intent.ACTION_PICK, ContactsContract.CommonDataKinds.Phone.CONTENT_URI);
+        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
         startActivityForResult(call, intent, PICK_CONTACT_REQUEST);
     }
 
     @Override
     protected void handleOnActivityResult(int requestCode, int resultCode, Intent data) {
-        super.handleOnActivityResult(requestCode, resultCode, data);
-        if (requestCode != PICK_CONTACT_REQUEST) return;
+        if (requestCode != PICK_CONTACT_REQUEST) {
+            super.handleOnActivityResult(requestCode, resultCode, data);
+            return;
+        }
         PluginCall call = getSavedCall();
         if (call == null) return;
         if (resultCode != Activity.RESULT_OK || data == null || data.getData() == null) {
             call.reject("No contact selected");
             return;
         }
-        Cursor cursor = getContext().getContentResolver().query(data.getData(), null, null, null, null);
+        String[] projection = new String[] {
+            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+            ContactsContract.CommonDataKinds.Phone.NUMBER
+        };
+        Cursor cursor = getContext().getContentResolver().query(data.getData(), projection, null, null, null);
         if (cursor != null) {
             try {
                 if (cursor.moveToFirst()) {
@@ -321,6 +362,7 @@ public class SmsSenderPlugin extends Plugin {
                     int phoneIndex = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER);
                     String name = nameIndex >= 0 ? cursor.getString(nameIndex) : "";
                     String phone = phoneIndex >= 0 ? cursor.getString(phoneIndex) : "";
+                    phone = phone.replaceAll("\\s+", "").replaceAll("-", "");
                     if (!phone.isEmpty()) {
                         JSObject result = new JSObject();
                         result.put("name", name);

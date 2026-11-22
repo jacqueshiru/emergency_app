@@ -27,6 +27,8 @@ interface SmsSenderPlugin {
     eventName: 'volumeSos',
     listener: (event: { timestamp: number }) => void
   ): Promise<PluginListenerHandle>;
+  isAccessibilityEnabled(): Promise<{ enabled: boolean }>;
+  openAccessibilitySettings(): Promise<{ opened?: boolean }>;
 }
 
 export const smsSenderSupported = Capacitor.getPlatform() === 'android';
@@ -59,4 +61,19 @@ export function onVolumeSos(cb: (event: { timestamp: number }) => void): () => v
     .then((h) => { if (removed) void h.remove(); else handle = h; })
     .catch(() => {});
   return () => { removed = true; if (handle) void handle.remove(); };
+}
+
+export async function volumeSosAccessibilityEnabled(): Promise<boolean> {
+  if (!smsSenderSupported) return false;
+  try {
+    const result = await smsSender.isAccessibilityEnabled();
+    return result.enabled;
+  } catch {
+    return false;
+  }
+}
+
+export async function openVolumeSosAccessibilitySettings(): Promise<void> {
+  if (!smsSenderSupported) return;
+  await smsSender.openAccessibilitySettings();
 }
