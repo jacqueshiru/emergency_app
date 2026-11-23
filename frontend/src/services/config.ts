@@ -7,6 +7,11 @@
  */
 const KEY = 'seas_server_url';
 const BUILD_TIME_ORIGIN = ((import.meta.env.VITE_API_URL as string | undefined) || '').replace(/\/+$/, '');
+const HOSTED_API_ORIGIN = (
+  (import.meta.env.VITE_HOSTED_API_URL as string | undefined) ||
+  BUILD_TIME_ORIGIN ||
+  'https://emergency-app-48rd.onrender.com'
+).replace(/\/+$/, '');
 const PREVIOUS_SERVER_ORIGIN = 'https://emergency-app-570x.onrender.com';
 
 /** Normalises user input to an origin like https://abc.trycloudflare.com ; null if it is not a valid http(s) URL. */
@@ -53,6 +58,10 @@ export function setServerOrigin(input: string): boolean {
 }
 
 export const getApiBase = (): string => `${getServerOrigin()}/api`;
+
+/** Uses the Vite proxy during local development to avoid hosted API CORS restrictions. */
+export const getHostedApiBase = (): string =>
+  import.meta.env.DEV ? '/hosted-api' : `${HOSTED_API_ORIGIN}/api`;
 
 export interface ConnectionCheck {
   ok: boolean;

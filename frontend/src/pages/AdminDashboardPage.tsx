@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../services/api';
+import type { AdminUserDTO } from '../services/api';
 import {
   AlertDTO,
   AlertDeliveryDTO,
@@ -22,59 +23,105 @@ import {
   RefreshCw,
 } from 'lucide-react';
 
+type AdminDataSource = 'Local' | 'Hosted' | 'Both';
+type Sourced<T> = T & { source: AdminDataSource };
+type SourceError = { source: Exclude<AdminDataSource, 'Both'>; message: string };
+
+async function loadFromBoth<T>(
+  loadLocal: () => Promise<T[]>,
+  loadHosted: () => Promise<T[]>
+): Promise<{ local: T[]; hosted: T[]; errors: SourceError[] }> {
+  const loadWithFreshSession = async (load: () => Promise<T[]>) => {
+    await api.ensureFreshSession();
+    return load();
+  };
+  const [localResult, hostedResult] = await Promise.allSettled([
+    loadWithFreshSession(loadLocal),
+    loadWithFreshSession(loadHosted),
+  ]);
+  const errors: SourceError[] = [];
+
+  if (localResult.status === 'rejected') {
+    errors.push({
+      source: 'Local',
+      message: localResult.reason instanceof Error ? localResult.reason.message : String(localResult.reason),
+    });
+  }
+  if (hostedResult.status === 'rejected') {
+    errors.push({
+      source: 'Hosted',
+      message: hostedResult.reason instanceof Error ? hostedResult.reason.message : String(hostedResult.reason),
+    });
+  }
+
+  return {
+    local: localResult.status === 'fulfilled' ? localResult.value : [],
+    hosted: hostedResult.status === 'fulfilled' ? hostedResult.value : [],
+    errors,
+  };
+}
+
+function mergeById<T extends { id: string }>(local: T[], hosted: T[]): Sourced<T>[] {
+  const records = new Map<string, Sourced<T>>();
+  local.forEach((record) => records.set(record.id, { ...record, source: 'Local' }));
+  hosted.forEach((record) => {
+    const existing = records.get(record.id);
+    if (existing) {
+      existing.source = 'Both';
+    } else {
+      records.set(record.id, { ...record, source: 'Hosted' });
+    }
+  });
+  return Array.from(records.values());
+}
+
 export const AdminDashboardPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'alerts' | 'users' | 'audit'>('alerts');
-  const [alerts, setAlerts] = useState<AlertDTO[]>([]);
-  const [users, setUsers] = useState<any[]>([]);
-  const [auditLogs, setAuditLogs] = useState<AuditLogDTO[]>([]);
+  const [alerts, setAlerts] = useState<Sourced<AlertDTO>[]>([]);
+  const [users, setUsers] = useState<Sourced<AdminUserDTO>[]>([]);
+  const [auditLogs, setAuditLogs] = useState<Sourced<AuditLogDTO>[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [sourceErrors, setSourceErrors] = useState<SourceError[]>([]);
 
   // Filters
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [resolutionFilter, setResolutionFilter] = useState<string>('');
-  const [selectedAlert, setSelectedAlert] = useState<AlertDTO | null>(null);
+  const [selectedAlert, setSelectedAlert] = useState<Sourced<AlertDTO> | null>(null);
 
   const socketRef = useRef<Socket | null>(null);
 
   const fetchAlerts = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      const data = await api.getAdminAlerts({
-        status: statusFilter || undefined,
-        resolutionStatus: resolutionFilter || undefined,
-      });
-      setAlerts(data);
-    } catch (err: any) {
-      setError(err.message || 'Failed to fetch admin alerts');
-    } finally {
-      setLoading(false);
-    }
+    setLoading(true);
+    setSourceErrors([]);
+    const filters = {
+      status: statusFilter || undefined,
+      resolutionStatus: resolutionFilter || undefined,
+    };
+    const result = await loadFromBoth(
+      () => api.getAdminAlerts(filters),
+      () => api.getHostedAdminAlerts(filters)
+    );
+    setAlerts(mergeById(result.local, result.hosted));
+    setSourceErrors(result.errors);
+    setLoading(false);
   };
 
   const fetchUsers = async () => {
-    try {
-      setLoading(true);
-      const data = await api.getAdminUsers();
-      setUsers(data);
-    } catch (err: any) {
-      setError(err.message || 'Failed to fetch users');
-    } finally {
-      setLoading(false);
-    }
+    setLoading(true);
+    setSourceErrors([]);
+    const result = await loadFromBoth(() => api.getAdminUsers(), () => api.getHostedAdminUsers());
+    setUsers(mergeById(result.local, result.hosted));
+    setSourceErrors(result.errors);
+    setLoading(false);
   };
 
   const fetchAuditLogs = async () => {
-    try {
-      setLoading(true);
-      const data = await api.getAdminAuditLogs();
-      setAuditLogs(data);
-    } catch (err: any) {
-      setError(err.message || 'Failed to fetch audit logs');
-    } finally {
-      setLoading(false);
-    }
+    setLoading(true);
+    setSourceErrors([]);
+    const result = await loadFromBoth(() => api.getAdminAuditLogs(), () => api.getHostedAdminAuditLogs());
+    setAuditLogs(mergeById(result.local, result.hosted));
+    setSourceErrors(result.errors);
+    setLoading(false);
   };
 
   useEffect(() => {
@@ -93,7 +140,11 @@ export const AdminDashboardPage: React.FC = () => {
       socket.emit('join:admin');
 
       socket.on('alert:new', (newAlert: AlertDTO) => {
-        setAlerts((prev) => [newAlert, ...prev.filter((a) => a.id !== newAlert.id)]);
+        setAlerts((prev) => {
+          const existing = prev.find((alert) => alert.id === newAlert.id);
+          const source: AdminDataSource = existing ? 'Both' : 'Local';
+          return [{ ...newAlert, source }, ...prev.filter((alert) => alert.id !== newAlert.id)];
+        });
       });
 
       socket.on('alert:delivery-updated', ({ alertId, delivery }: { alertId: string; delivery: AlertDeliveryDTO }) => {
@@ -116,8 +167,12 @@ export const AdminDashboardPage: React.FC = () => {
       });
 
       socket.on('alert:resolution-updated', (updatedAlert: AlertDTO) => {
-        setAlerts((prev) => prev.map((a) => (a.id === updatedAlert.id ? updatedAlert : a)));
-        setSelectedAlert((curr) => (curr?.id === updatedAlert.id ? updatedAlert : curr));
+        setAlerts((prev) =>
+          prev.map((alert) => (alert.id === updatedAlert.id ? { ...updatedAlert, source: alert.source } : alert))
+        );
+        setSelectedAlert((curr) =>
+          curr?.id === updatedAlert.id ? { ...updatedAlert, source: curr.source } : curr
+        );
       });
 
       return () => {
@@ -136,7 +191,7 @@ export const AdminDashboardPage: React.FC = () => {
             <span>Emergency Operations Dashboard</span>
           </h1>
           <p className="text-sm text-zinc-400 mt-1">
-            Realtime monitoring room for emergency alerts, delivery reports and audit records.
+            Combined local and hosted monitoring for emergency alerts, delivery reports and audit records.
           </p>
         </div>
 
@@ -169,9 +224,11 @@ export const AdminDashboardPage: React.FC = () => {
         </div>
       </div>
 
-      {error && (
-        <div className="mt-6 p-4 rounded-xl bg-red-950/60 border border-red-800 text-red-200 text-sm">
-          {error}
+      {sourceErrors.length > 0 && (
+        <div role="alert" className="mt-6 p-4 rounded-xl bg-red-950/60 border border-red-800 text-red-200 text-sm space-y-1">
+          {sourceErrors.map((sourceError) => (
+            <p key={sourceError.source}>{sourceError.source} source unavailable: {sourceError.message}</p>
+          ))}
         </div>
       )}
 
@@ -223,7 +280,7 @@ export const AdminDashboardPage: React.FC = () => {
             <div className="text-center py-12 text-zinc-500 text-sm">Loading live alerts...</div>
           ) : alerts.length === 0 ? (
             <div className="text-center py-16 bg-zinc-900/50 border border-zinc-800/80 rounded-2xl text-zinc-400 text-sm">
-              No emergency alerts found for the selected filters.
+              No emergency alerts found in the available sources for the selected filters.
             </div>
           ) : (
             <div className="space-y-4">
@@ -252,6 +309,7 @@ export const AdminDashboardPage: React.FC = () => {
                             <h3 className="font-bold text-white text-base">
                               {alert.user?.name || 'Unknown User'}
                             </h3>
+                            <span className="rounded bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-300">{alert.source}</span>
                             <span className="text-xs text-zinc-400 font-mono">
                               ({alert.user?.phoneNumber || 'No phone'})
                             </span>
@@ -348,9 +406,16 @@ export const AdminDashboardPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800">
-                {users.map((u) => (
+                {loading && users.length === 0 ? (
+                  <tr><td colSpan={6} className="px-6 py-10 text-center text-zinc-500">Loading users from both sources...</td></tr>
+                ) : users.length === 0 ? (
+                  <tr><td colSpan={6} className="px-6 py-10 text-center text-zinc-500">No users found in the available sources.</td></tr>
+                ) : users.map((u) => (
                   <tr key={u.id} className="hover:bg-zinc-800/40 transition">
-                    <td className="px-6 py-4 font-medium text-white">{u.name}</td>
+                    <td className="px-6 py-4 font-medium text-white">
+                      {u.name}
+                      <span className="ml-2 text-[10px] text-zinc-500">{u.source}</span>
+                    </td>
                     <td className="px-6 py-4 font-mono">{u.phoneNumber}</td>
                     <td className="px-6 py-4">
                       <span
@@ -386,7 +451,11 @@ export const AdminDashboardPage: React.FC = () => {
           </p>
 
           <div className="space-y-3 font-mono text-xs">
-            {auditLogs.map((log) => (
+            {loading && auditLogs.length === 0 ? (
+              <p className="py-8 text-center text-zinc-500">Loading audit logs from both sources...</p>
+            ) : auditLogs.length === 0 ? (
+              <p className="py-8 text-center text-zinc-500">No audit records found in the available sources.</p>
+            ) : auditLogs.map((log) => (
               <div
                 key={log.id}
                 className="p-3 rounded-xl bg-zinc-950 border border-zinc-800/80 flex items-center justify-between"
@@ -394,6 +463,7 @@ export const AdminDashboardPage: React.FC = () => {
                 <div>
                   <span className="text-red-400 font-semibold">{log.action}</span>
                   <span className="text-zinc-500 ml-3">Actor: {log.actorId || 'SYSTEM'}</span>
+                  <span className="text-zinc-500 ml-3">Source: {log.source}</span>
                 </div>
                 <span className="text-zinc-500">{new Date(log.createdAt).toLocaleString()}</span>
               </div>

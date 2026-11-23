@@ -9,7 +9,7 @@ import {
   AuditLogDTO,
 } from '@seas/shared';
 
-import { getApiBase } from './config';
+import { getApiBase, getHostedApiBase } from './config';
 import * as store from './tokenStore';
 import { saveContacts } from './contactsCache';
 
@@ -18,6 +18,17 @@ export class ApiError extends Error {
     super(message);
     this.name = 'ApiError';
   }
+}
+
+export interface AdminUserDTO {
+  id: string;
+  phoneNumber: string;
+  name: string | null;
+  role: string;
+  createdAt: string;
+  updatedAt: string;
+  contactsCount: number;
+  alertsCount: number;
 }
 
 class ApiService {
@@ -108,13 +119,18 @@ class ApiService {
     }
   }
 
-  private async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-    const url = endpoint.startsWith('http') ? endpoint : `${getApiBase()}${endpoint}`;
+  private async request<T>(
+    endpoint: string,
+    options: RequestInit = {},
+    base = getApiBase(),
+    refreshSession = true
+  ): Promise<T> {
+    const url = endpoint.startsWith('http') ? endpoint : `${base}${endpoint}`;
     const isAuthEndpoint = endpoint.includes('/auth/');
 
     // Proactive refresh avoids a guaranteed 401 round-trip.
     let token = this.getAccessToken();
-    if (token && !isAuthEndpoint && this.isExpired(token) && this.getRefreshToken()) {
+    if (refreshSession && token && !isAuthEndpoint && this.isExpired(token) && this.getRefreshToken()) {
       token = await this.refreshAccessToken();
     }
 
@@ -140,7 +156,7 @@ class ApiService {
       );
     }
 
-    if (response.status === 401 && !isAuthEndpoint) {
+    if (refreshSession && response.status === 401 && !isAuthEndpoint) {
       const newToken = await this.refreshAccessToken();
       try {
         response = await send(newToken);
@@ -274,12 +290,31 @@ class ApiService {
     return this.request<AlertDTO[]>(`/admin/alerts${query}`);
   }
 
-  async getAdminUsers(): Promise<any[]> {
+  async getHostedAdminAlerts(filters?: { status?: string; resolutionStatus?: string; from?: string; to?: string }): Promise<AlertDTO[]> {
+    const params = new URLSearchParams();
+    if (filters?.status) params.append('status', filters.status);
+    if (filters?.resolutionStatus) params.append('resolutionStatus', filters.resolutionStatus);
+    if (filters?.from) params.append('from', filters.from);
+    if (filters?.to) params.append('to', filters.to);
+
+    const query = params.toString() ? `?${params.toString()}` : '';
+    return this.request<AlertDTO[]>(`/admin/alerts${query}`, {}, getHostedApiBase(), false);
+  }
+
+  async getAdminUsers(): Promise<AdminUserDTO[]> {
     return this.request('/admin/users');
+  }
+
+  async getHostedAdminUsers(): Promise<AdminUserDTO[]> {
+    return this.request('/admin/users', {}, getHostedApiBase(), false);
   }
 
   async getAdminAuditLogs(): Promise<AuditLogDTO[]> {
     return this.request('/admin/audit-logs');
+  }
+
+  async getHostedAdminAuditLogs(): Promise<AuditLogDTO[]> {
+    return this.request('/admin/audit-logs', {}, getHostedApiBase(), false);
   }
 
   async confirmContactConsent(id: string): Promise<EmergencyContactDTO> {
