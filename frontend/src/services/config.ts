@@ -7,6 +7,7 @@
  */
 const KEY = 'seas_server_url';
 const BUILD_TIME_ORIGIN = ((import.meta.env.VITE_API_URL as string | undefined) || '').replace(/\/+$/, '');
+const PREVIOUS_SERVER_ORIGIN = 'https://emergency-app-570x.onrender.com';
 
 /** Normalises user input to an origin like https://abc.trycloudflare.com ; null if it is not a valid http(s) URL. */
 export function normalizeServerUrl(input: string): string | null {
@@ -24,6 +25,10 @@ export function normalizeServerUrl(input: string): string | null {
 export function getServerOrigin(): string {
   try {
     const saved = localStorage.getItem(KEY);
+    if (saved === PREVIOUS_SERVER_ORIGIN && BUILD_TIME_ORIGIN) {
+      localStorage.setItem(KEY, BUILD_TIME_ORIGIN);
+      return BUILD_TIME_ORIGIN;
+    }
     if (saved) return saved;
   } catch {
     // storage unavailable: fall back to the build-time value
