@@ -9,7 +9,14 @@ import { SecureStorage } from '@aparajita/capacitor-secure-storage';
  *  - Browser: plain localStorage, as before.
  */
 const native = Capacitor.isNativePlatform();
-const KEYS = ['seas_access_token', 'seas_refresh_token', 'seas_user', 'seas_contacts'];
+const KEYS = [
+  'seas_access_token',
+  'seas_refresh_token',
+  'seas_user',
+  'seas_contacts',
+  'seas_hosted_admin_access_token',
+  'seas_hosted_admin_refresh_token',
+];
 const cache = new Map<string, string>();
 let ready: Promise<void> | null = null;
 

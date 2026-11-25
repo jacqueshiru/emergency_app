@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { api } from '../services/api';
+import { api, ApiError } from '../services/api';
 import type { AdminUserDTO } from '../services/api';
+import { Role } from '@seas/shared';
+import { useAuth } from '../context/AuthContext';
+import QRCode from 'qrcode';
 import {
   AlertDTO,
   AlertDeliveryDTO,
@@ -21,6 +24,7 @@ import {
   MapPinOff,
   Eye,
   RefreshCw,
+  KeyRound,
 } from 'lucide-react';
 
 type AdminDataSource = 'Local' | 'Hosted' | 'Both';
@@ -30,16 +34,13 @@ type SourceError = { source: Exclude<AdminDataSource, 'Both'>; message: string }
 async function loadFromBoth<T>(
   loadLocal: () => Promise<T[]>,
   loadHosted: () => Promise<T[]>
-): Promise<{ local: T[]; hosted: T[]; errors: SourceError[] }> {
-  const loadWithFreshSession = async (load: () => Promise<T[]>) => {
-    await api.ensureFreshSession();
-    return load();
-  };
+): Promise<{ local: T[]; hosted: T[]; errors: SourceError[]; hostedAuthRequired: boolean }> {
   const [localResult, hostedResult] = await Promise.allSettled([
-    loadWithFreshSession(loadLocal),
-    loadWithFreshSession(loadHosted),
+    api.ensureFreshSession().then(loadLocal),
+    api.ensureFreshHostedAdminSession().then(loadHosted),
   ]);
   const errors: SourceError[] = [];
+  let hostedAuthRequired = false;
 
   if (localResult.status === 'rejected') {
     errors.push({
@@ -48,6 +49,11 @@ async function loadFromBoth<T>(
     });
   }
   if (hostedResult.status === 'rejected') {
+    hostedAuthRequired =
+      hostedResult.reason instanceof ApiError &&
+      (hostedResult.reason.status === 401 ||
+        hostedResult.reason.code === 'HOSTED_LOGIN_REQUIRED' ||
+        hostedResult.reason.code === 'ADMIN_MFA_REQUIRED');
     errors.push({
       source: 'Hosted',
       message: hostedResult.reason instanceof Error ? hostedResult.reason.message : String(hostedResult.reason),
@@ -58,6 +64,7 @@ async function loadFromBoth<T>(
     local: localResult.status === 'fulfilled' ? localResult.value : [],
     hosted: hostedResult.status === 'fulfilled' ? hostedResult.value : [],
     errors,
+    hostedAuthRequired,
   };
 }
 
@@ -76,6 +83,7 @@ function mergeById<T extends { id: string }>(local: T[], hosted: T[]): Sourced<T
 }
 
 export const AdminDashboardPage: React.FC = () => {
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<'alerts' | 'users' | 'audit'>('alerts');
   const [alerts, setAlerts] = useState<Sourced<AlertDTO>[]>([]);
   const [users, setUsers] = useState<Sourced<AdminUserDTO>[]>([]);
@@ -87,6 +95,19 @@ export const AdminDashboardPage: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [resolutionFilter, setResolutionFilter] = useState<string>('');
   const [selectedAlert, setSelectedAlert] = useState<Sourced<AlertDTO> | null>(null);
+  const [hostedConnected, setHostedConnected] = useState(api.hasHostedAdminSession());
+  const [hostedStep, setHostedStep] = useState<'phone' | 'otp' | 'mfa'>('phone');
+  const [hostedPhone, setHostedPhone] = useState(user?.phoneNumber || '');
+  const [hostedOtp, setHostedOtp] = useState('');
+  const [hostedMfaCode, setHostedMfaCode] = useState('');
+  const [hostedDevOtp, setHostedDevOtp] = useState<string | null>(null);
+  const [hostedPendingSession, setHostedPendingSession] = useState<{ accessToken: string; refreshToken: string } | null>(null);
+  const [hostedMfaSecret, setHostedMfaSecret] = useState('');
+  const [hostedMfaQr, setHostedMfaQr] = useState('');
+  const [hostedNeedsMfaSetup, setHostedNeedsMfaSetup] = useState(false);
+  const [hostedAuthError, setHostedAuthError] = useState('');
+  const [hostedAuthLoading, setHostedAuthLoading] = useState(false);
+  const [hostedSessionVersion, setHostedSessionVersion] = useState(0);
 
   const socketRef = useRef<Socket | null>(null);
 
@@ -101,6 +122,10 @@ export const AdminDashboardPage: React.FC = () => {
       () => api.getAdminAlerts(filters),
       () => api.getHostedAdminAlerts(filters)
     );
+    if (result.hostedAuthRequired) {
+      api.clearHostedAdminSession();
+      setHostedConnected(false);
+    }
     setAlerts(mergeById(result.local, result.hosted));
     setSourceErrors(result.errors);
     setLoading(false);
@@ -110,6 +135,10 @@ export const AdminDashboardPage: React.FC = () => {
     setLoading(true);
     setSourceErrors([]);
     const result = await loadFromBoth(() => api.getAdminUsers(), () => api.getHostedAdminUsers());
+    if (result.hostedAuthRequired) {
+      api.clearHostedAdminSession();
+      setHostedConnected(false);
+    }
     setUsers(mergeById(result.local, result.hosted));
     setSourceErrors(result.errors);
     setLoading(false);
@@ -119,6 +148,10 @@ export const AdminDashboardPage: React.FC = () => {
     setLoading(true);
     setSourceErrors([]);
     const result = await loadFromBoth(() => api.getAdminAuditLogs(), () => api.getHostedAdminAuditLogs());
+    if (result.hostedAuthRequired) {
+      api.clearHostedAdminSession();
+      setHostedConnected(false);
+    }
     setAuditLogs(mergeById(result.local, result.hosted));
     setSourceErrors(result.errors);
     setLoading(false);
@@ -128,7 +161,100 @@ export const AdminDashboardPage: React.FC = () => {
     if (activeTab === 'alerts') fetchAlerts();
     if (activeTab === 'users') fetchUsers();
     if (activeTab === 'audit') fetchAuditLogs();
-  }, [activeTab, statusFilter, resolutionFilter]);
+  }, [activeTab, statusFilter, resolutionFilter, hostedSessionVersion]);
+
+  const requestHostedOtp = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setHostedAuthLoading(true);
+    setHostedAuthError('');
+    try {
+      const result = await api.requestHostedAdminOtp(hostedPhone.trim());
+      setHostedDevOtp(result.devCode ?? null);
+      setHostedOtp(result.devCode ?? '');
+      setHostedStep('otp');
+    } catch (error) {
+      setHostedAuthError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setHostedAuthLoading(false);
+    }
+  };
+
+  const verifyHostedOtp = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setHostedAuthLoading(true);
+    setHostedAuthError('');
+    try {
+      const session = await api.verifyHostedAdminOtp(hostedPhone.trim(), hostedOtp.trim());
+      if (session.user.role !== Role.ADMIN) {
+        await api.revokeHostedSession(session.refreshToken);
+        setHostedStep('phone');
+        setHostedAuthError('This phone number is not an administrator on the hosted server.');
+        return;
+      }
+      setHostedPendingSession({ accessToken: session.accessToken, refreshToken: session.refreshToken });
+      setHostedNeedsMfaSetup(false);
+      setHostedStep('mfa');
+    } catch (error) {
+      setHostedAuthError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setHostedAuthLoading(false);
+    }
+  };
+
+  const setupHostedMfa = async () => {
+    if (!hostedPendingSession) return;
+    setHostedAuthLoading(true);
+    setHostedAuthError('');
+    try {
+      const result = await api.setupHostedAdminMfa(hostedPendingSession.accessToken);
+      setHostedMfaSecret(result.secret);
+      setHostedMfaQr(await QRCode.toDataURL(result.otpauth, { errorCorrectionLevel: 'M', margin: 2, width: 220 }));
+      setHostedNeedsMfaSetup(true);
+    } catch (error) {
+      setHostedAuthError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setHostedAuthLoading(false);
+    }
+  };
+
+  const verifyHostedMfa = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!hostedPendingSession) return;
+    setHostedAuthLoading(true);
+    setHostedAuthError('');
+    try {
+      await api.verifyHostedAdminMfa(
+        hostedMfaCode.trim(),
+        hostedPendingSession.accessToken,
+        hostedPendingSession.refreshToken
+      );
+      setHostedConnected(true);
+      setHostedPendingSession(null);
+      setHostedMfaCode('');
+      setHostedMfaQr('');
+      setHostedMfaSecret('');
+      setHostedSessionVersion((version) => version + 1);
+    } catch (error: any) {
+      setHostedAuthError(error instanceof Error ? error.message : String(error));
+      if (error?.code === 'ADMIN_MFA_SETUP_REQUIRED') setHostedNeedsMfaSetup(true);
+    } finally {
+      setHostedAuthLoading(false);
+    }
+  };
+
+  const disconnectHosted = async () => {
+    setHostedAuthLoading(true);
+    setHostedAuthError('');
+    try {
+      await api.logoutHostedAdmin();
+    } catch (error) {
+      setHostedAuthError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setHostedConnected(false);
+      setHostedSessionVersion((version) => version + 1);
+      setHostedAuthLoading(false);
+    }
+  };
 
   // Realtime Socket.io wiring
   useEffect(() => {
@@ -223,6 +349,144 @@ export const AdminDashboardPage: React.FC = () => {
           </button>
         </div>
       </div>
+
+      <section className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-900 p-4 sm:p-5 space-y-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="font-semibold text-white">Hosted server access</h2>
+            <p className="mt-1 text-xs text-zinc-400">
+              Local and hosted servers use separate accounts and sessions. Connect with an administrator registered on Render to view alerts sent from phones.
+            </p>
+          </div>
+          {hostedConnected && (
+            <button
+              type="button"
+              onClick={disconnectHosted}
+              disabled={hostedAuthLoading}
+              className="self-start rounded-lg bg-zinc-800 px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-700 disabled:opacity-50 sm:self-auto"
+            >
+              {hostedAuthLoading ? 'Disconnecting...' : 'Disconnect hosted server'}
+            </button>
+          )}
+        </div>
+
+        {hostedConnected ? (
+          <p role="status" className="text-sm text-emerald-400">Hosted administrator session connected.</p>
+        ) : hostedPendingSession ? (
+          <form onSubmit={verifyHostedMfa} className="max-w-xl space-y-3">
+            <p className="text-sm text-zinc-300">
+              {hostedNeedsMfaSetup
+                ? 'Hosted authenticator setup is required. Scan the QR code below, then enter its 6-digit code.'
+                : 'Enter the 6-digit code from the authenticator registered on the hosted server.'}
+            </p>
+            {hostedDevOtp && <p className="text-xs text-amber-300">Hosted staging OTP: <span className="font-mono font-bold">{hostedDevOtp}</span></p>}
+            <div className="flex flex-wrap gap-2">
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                maxLength={6}
+                value={hostedMfaCode}
+                onChange={(event) => setHostedMfaCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
+                placeholder="6-digit authenticator code"
+                className="min-w-52 flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-white"
+              />
+              <button
+                type="submit"
+                disabled={hostedAuthLoading || hostedMfaCode.length !== 6}
+                className="rounded-lg bg-emerald-700 px-4 py-2 text-sm text-white hover:bg-emerald-600 disabled:opacity-50"
+              >
+                {hostedAuthLoading ? 'Verifying...' : 'Verify & connect'}
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={setupHostedMfa}
+              disabled={hostedAuthLoading}
+              className="flex items-center gap-2 rounded-lg bg-zinc-800 px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-700 disabled:opacity-50"
+            >
+              <KeyRound className="h-4 w-4" />
+              Set up or reset hosted authenticator
+            </button>
+            <p className="text-xs text-amber-300">
+              Only set up/reset if you cannot use the existing hosted authenticator. Resetting replaces its secret.
+            </p>
+            {hostedMfaQr && (
+              <div className="inline-flex flex-col items-center gap-2 rounded-xl bg-white p-3">
+                <img src={hostedMfaQr} alt="Hosted server authenticator setup QR code" width={220} height={220} />
+                <span className="text-xs text-zinc-700">Scan this hosted-server QR code</span>
+              </div>
+            )}
+            {hostedMfaSecret && (
+              <p className="break-all text-xs text-zinc-400">
+                Manual setup key: <span className="font-mono text-zinc-200">{hostedMfaSecret}</span>
+              </p>
+            )}
+          </form>
+        ) : (
+          <form onSubmit={hostedStep === 'phone' ? requestHostedOtp : verifyHostedOtp} className="max-w-xl space-y-3">
+            {hostedStep === 'phone' ? (
+              <>
+                <label className="block text-xs font-medium text-zinc-300" htmlFor="hosted-admin-phone">Hosted admin phone number</label>
+                <div className="flex flex-wrap gap-2">
+                  <input
+                    id="hosted-admin-phone"
+                    type="tel"
+                    autoComplete="tel"
+                    value={hostedPhone}
+                    onChange={(event) => setHostedPhone(event.target.value)}
+                    placeholder="+254..."
+                    required
+                    className="min-w-52 flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-white"
+                  />
+                  <button
+                    type="submit"
+                    disabled={hostedAuthLoading || !hostedPhone.trim()}
+                    className="rounded-lg bg-red-700 px-4 py-2 text-sm text-white hover:bg-red-600 disabled:opacity-50"
+                  >
+                    {hostedAuthLoading ? 'Sending...' : 'Send hosted OTP'}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <label className="block text-xs font-medium text-zinc-300" htmlFor="hosted-admin-otp">
+                  Enter the hosted-server OTP sent to {hostedPhone}
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  <input
+                    id="hosted-admin-otp"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    value={hostedOtp}
+                    onChange={(event) => setHostedOtp(event.target.value.replace(/\D/g, '').slice(0, 6))}
+                    required
+                    className="min-w-52 flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-white"
+                  />
+                  <button
+                    type="submit"
+                    disabled={hostedAuthLoading || hostedOtp.length !== 6}
+                    className="rounded-lg bg-red-700 px-4 py-2 text-sm text-white hover:bg-red-600 disabled:opacity-50"
+                  >
+                    {hostedAuthLoading ? 'Checking...' : 'Continue to MFA'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setHostedStep('phone'); setHostedOtp(''); setHostedDevOtp(null); }}
+                    className="rounded-lg bg-zinc-800 px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-700"
+                  >
+                    Change number
+                  </button>
+                </div>
+                {hostedDevOtp && <p className="text-xs text-amber-300">Hosted staging OTP: <span className="font-mono font-bold">{hostedDevOtp}</span></p>}
+              </>
+            )}
+          </form>
+        )}
+
+        {hostedAuthError && <p role="alert" className="text-sm text-red-300">{hostedAuthError}</p>}
+      </section>
 
       {sourceErrors.length > 0 && (
         <div role="alert" className="mt-6 p-4 rounded-xl bg-red-950/60 border border-red-800 text-red-200 text-sm space-y-1">

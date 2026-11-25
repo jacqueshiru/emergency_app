@@ -56,6 +56,7 @@ class ApiService {
 
   // ---- Session refresh (single-flight) ----
   private refreshInFlight: Promise<string> | null = null;
+  private hostedRefreshInFlight: Promise<string> | null = null;
 
   /** Reads the `exp` claim (seconds) from a JWT without verifying it. Null if unreadable. */
   private tokenExpiryMs(token: string): number | null {
@@ -119,17 +120,74 @@ class ApiService {
     }
   }
 
+  private getHostedAccessToken(): string | null {
+    return store.getItem('seas_hosted_admin_access_token');
+  }
+
+  private getHostedRefreshToken(): string | null {
+    return store.getItem('seas_hosted_admin_refresh_token');
+  }
+
+  private setHostedTokens(accessToken: string, refreshToken?: string): void {
+    store.setItem('seas_hosted_admin_access_token', accessToken);
+    if (refreshToken) store.setItem('seas_hosted_admin_refresh_token', refreshToken);
+  }
+
+  hasHostedAdminSession(): boolean {
+    return Boolean(this.getHostedAccessToken() && this.getHostedRefreshToken());
+  }
+
+  clearHostedAdminSession(): void {
+    store.removeItem('seas_hosted_admin_access_token');
+    store.removeItem('seas_hosted_admin_refresh_token');
+  }
+
+  async ensureFreshHostedAdminSession(): Promise<void> {
+    const accessToken = this.getHostedAccessToken();
+    const refreshToken = this.getHostedRefreshToken();
+    if (!accessToken || !refreshToken) {
+      throw new ApiError('Connect to the hosted server with an administrator account.', 401, 'HOSTED_LOGIN_REQUIRED');
+    }
+    if (!this.isExpired(accessToken)) return;
+    if (this.hostedRefreshInFlight) {
+      await this.hostedRefreshInFlight;
+      return;
+    }
+
+    this.hostedRefreshInFlight = (async () => {
+      const response = await this.request<{ accessToken: string }>(
+        '/auth/refresh',
+        { method: 'POST', body: JSON.stringify({ refreshToken }) },
+        getHostedApiBase(),
+        false,
+        null
+      );
+      this.setHostedTokens(response.accessToken);
+      return response.accessToken;
+    })().catch((error: unknown) => {
+      if (error instanceof ApiError && (error.status === 400 || error.status === 401 || error.status === 403)) {
+        this.clearHostedAdminSession();
+        throw new ApiError('Hosted admin session expired. Connect to the hosted server again.', error.status, 'HOSTED_LOGIN_REQUIRED');
+      }
+      throw error;
+    }).finally(() => {
+      this.hostedRefreshInFlight = null;
+    });
+    await this.hostedRefreshInFlight;
+  }
+
   private async request<T>(
     endpoint: string,
     options: RequestInit = {},
     base = getApiBase(),
-    refreshSession = true
+    refreshSession = true,
+    accessToken: string | null = this.getAccessToken()
   ): Promise<T> {
     const url = endpoint.startsWith('http') ? endpoint : `${base}${endpoint}`;
     const isAuthEndpoint = endpoint.includes('/auth/');
 
     // Proactive refresh avoids a guaranteed 401 round-trip.
-    let token = this.getAccessToken();
+    let token = accessToken;
     if (refreshSession && token && !isAuthEndpoint && this.isExpired(token) && this.getRefreshToken()) {
       token = await this.refreshAccessToken();
     }
@@ -184,6 +242,61 @@ class ApiService {
       method: 'POST',
       body: JSON.stringify({ phoneNumber, name }),
     });
+  }
+
+  async requestHostedAdminOtp(phoneNumber: string): Promise<{ success: boolean; devCode?: string }> {
+    return this.request('/auth/otp/request', {
+      method: 'POST',
+      body: JSON.stringify({ phoneNumber }),
+    }, getHostedApiBase(), false, null);
+  }
+
+  async verifyHostedAdminOtp(phoneNumber: string, code: string): Promise<AuthTokensDTO> {
+    return this.request<AuthTokensDTO>('/auth/otp/verify', {
+      method: 'POST',
+      body: JSON.stringify({ phoneNumber, code }),
+    }, getHostedApiBase(), false, null);
+  }
+
+  async revokeHostedSession(refreshToken: string): Promise<void> {
+    await this.request('/auth/logout', {
+      method: 'POST',
+      body: JSON.stringify({ refreshToken }),
+    }, getHostedApiBase(), false, null);
+  }
+
+  async setupHostedAdminMfa(accessToken: string): Promise<{ secret: string; otpauth: string }> {
+    return this.request('/auth/admin/mfa/setup', { method: 'POST' }, getHostedApiBase(), false, accessToken);
+  }
+
+  async verifyHostedAdminMfa(
+    code: string,
+    accessToken: string,
+    refreshToken: string
+  ): Promise<{ success: boolean; accessToken: string }> {
+    const result = await this.request<{ success: boolean; accessToken: string }>(
+      '/auth/admin/mfa/verify',
+      { method: 'POST', body: JSON.stringify({ code }) },
+      getHostedApiBase(),
+      false,
+      accessToken
+    );
+    this.setHostedTokens(result.accessToken, refreshToken);
+    return result;
+  }
+
+  async logoutHostedAdmin(): Promise<void> {
+    const refreshToken = this.getHostedRefreshToken();
+    try {
+      if (refreshToken) {
+        await this.request('/auth/logout', {
+          method: 'POST',
+          body: JSON.stringify({ refreshToken }),
+        }, getHostedApiBase(), false, null);
+      }
+    } finally {
+      this.clearHostedAdminSession();
+    }
   }
 
   async verifyOtp(phoneNumber: string, code: string, name?: string): Promise<AuthTokensDTO> {
@@ -298,7 +411,7 @@ class ApiService {
     if (filters?.to) params.append('to', filters.to);
 
     const query = params.toString() ? `?${params.toString()}` : '';
-    return this.request<AlertDTO[]>(`/admin/alerts${query}`, {}, getHostedApiBase(), false);
+    return this.request<AlertDTO[]>(`/admin/alerts${query}`, {}, getHostedApiBase(), false, this.getHostedAccessToken());
   }
 
   async getAdminUsers(): Promise<AdminUserDTO[]> {
@@ -306,7 +419,7 @@ class ApiService {
   }
 
   async getHostedAdminUsers(): Promise<AdminUserDTO[]> {
-    return this.request('/admin/users', {}, getHostedApiBase(), false);
+    return this.request('/admin/users', {}, getHostedApiBase(), false, this.getHostedAccessToken());
   }
 
   async getAdminAuditLogs(): Promise<AuditLogDTO[]> {
@@ -314,7 +427,7 @@ class ApiService {
   }
 
   async getHostedAdminAuditLogs(): Promise<AuditLogDTO[]> {
-    return this.request('/admin/audit-logs', {}, getHostedApiBase(), false);
+    return this.request('/admin/audit-logs', {}, getHostedApiBase(), false, this.getHostedAccessToken());
   }
 
   async confirmContactConsent(id: string): Promise<EmergencyContactDTO> {
