@@ -233,6 +233,7 @@ export const AdminDashboardPage: React.FC = () => {
       setHostedMfaCode('');
       setHostedMfaQr('');
       setHostedMfaSecret('');
+      setHostedNeedsMfaSetup(false);
       setHostedSessionVersion((version) => version + 1);
     } catch (error: any) {
       setHostedAuthError(error instanceof Error ? error.message : String(error));
@@ -251,6 +252,12 @@ export const AdminDashboardPage: React.FC = () => {
       setHostedAuthError(error instanceof Error ? error.message : String(error));
     } finally {
       setHostedConnected(false);
+      setHostedStep('phone');
+      setHostedPendingSession(null);
+      setHostedMfaCode('');
+      setHostedMfaQr('');
+      setHostedMfaSecret('');
+      setHostedNeedsMfaSetup(false);
       setHostedSessionVersion((version) => version + 1);
       setHostedAuthLoading(false);
     }
